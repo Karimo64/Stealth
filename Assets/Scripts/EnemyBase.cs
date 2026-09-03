@@ -1,15 +1,18 @@
 using UnityEngine;
 
 // Base class for any enemy that can "see" the player with a vision cone.
-// CameraEnemy and SearcherEnemy will both inherit from this later — this
-// class only handles: detecting the player, and drawing the yellow cone.
-// Movement (or not moving) is added by the subclasses.
-//
-// NOTE: the cone is drawn on an auto-created CHILD object, not on this
-// GameObject itself — a GameObject can't have both a SpriteRenderer (the
-// enemy's triangle) and a MeshRenderer (the cone) at the same time.
+// CameraEnemy and SearcherEnemy both inherit from this — this class only
+// handles: detecting the player, drawing the yellow cone, and broadcasting
+// a shared "alert" event whenever ANY enemy spots the player. Movement (or
+// not moving) is added by the subclasses.
 public class EnemyBase : MonoBehaviour
 {
+    // Fired the moment ANY enemy first spots the player, carrying the
+    // player's position at that instant. SearcherEnemy listens to this to
+    // know when to break off patrol and go investigate. CameraEnemy simply
+    // never subscribes to it, so it has no effect on cameras.
+    public static event System.Action<Vector2> PlayerSpotted;
+
     [Header("Vision Settings")]
     [SerializeField] protected float viewRadius = 3f;
     [SerializeField] protected float viewAngle = 65f;
@@ -24,6 +27,7 @@ public class EnemyBase : MonoBehaviour
 
     protected bool playerDetected;
     protected Transform detectedPlayer;
+    private bool wasDetectedLastFrame; // used to only fire the alert once per detection, not every frame
 
     private const int rayCount = 30; // how many slices make up the cone mesh (higher = smoother)
     private Mesh viewMesh;
@@ -51,29 +55,37 @@ public class EnemyBase : MonoBehaviour
     }
 
     // Checks whether the player is within range, within the cone angle,
-    // AND not hidden behind a wall.
+    // AND not hidden behind a wall. Fires PlayerSpotted the moment
+    // detection starts (not every frame it stays true).
     protected virtual void DetectPlayer()
     {
         playerDetected = false;
         detectedPlayer = null;
 
         Collider2D playerCollider = Physics2D.OverlapCircle(transform.position, viewRadius, playerMask);
-        if (playerCollider == null) return;
-
-        Vector2 dirToPlayer = (playerCollider.transform.position - transform.position).normalized;
-
-        // transform.up is treated as "forward" — the direction the enemy is facing.
-        if (Vector2.Angle(transform.up, dirToPlayer) < viewAngle / 2f)
+        if (playerCollider != null)
         {
-            float distToPlayer = Vector2.Distance(transform.position, playerCollider.transform.position);
+            Vector2 dirToPlayer = (playerCollider.transform.position - transform.position).normalized;
 
-            // If a wall is hit before reaching the player, they're hidden — not detected.
-            if (!Physics2D.Raycast(transform.position, dirToPlayer, distToPlayer, obstacleMask))
+            // transform.up is treated as "forward" — the direction the enemy is facing.
+            if (Vector2.Angle(transform.up, dirToPlayer) < viewAngle / 2f)
             {
-                playerDetected = true;
-                detectedPlayer = playerCollider.transform;
+                float distToPlayer = Vector2.Distance(transform.position, playerCollider.transform.position);
+
+                // If a wall is hit before reaching the player, they're hidden — not detected.
+                if (!Physics2D.Raycast(transform.position, dirToPlayer, distToPlayer, obstacleMask))
+                {
+                    playerDetected = true;
+                    detectedPlayer = playerCollider.transform;
+                }
             }
         }
+
+        // Rising edge: only fire the moment detection STARTS, not every frame.
+        if (playerDetected && !wasDetectedLastFrame)
+            PlayerSpotted?.Invoke(detectedPlayer.position);
+
+        wasDetectedLastFrame = playerDetected;
     }
 
     // Builds a fan-shaped mesh representing the vision cone. Each "slice" is
