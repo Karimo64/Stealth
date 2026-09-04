@@ -46,9 +46,8 @@ public class SearcherEnemy : EnemyBase
     private float turnRemaining; // degrees still to rotate
     private float turnSign;      // +1 = counter-clockwise, -1 = clockwise
 
-    private Vector2 investigateTarget;
     private Vector2 preInvestigatePosition; // spot to walk back to once it gives up chasing
-    private bool hasSeenPlayerThisChase;    // true once THIS enemy's own cone has actually caught the player
+    private bool hasEyesOnPlayer;           // is THIS enemy's own cone on the player right now?
 
     private List<Vector2> currentPath; // route from Pathfinder, null = walk straight
     private int pathIndex;             // which step of that route we're heading to
@@ -75,20 +74,22 @@ public class SearcherEnemy : EnemyBase
         PlayerSpotted -= OnPlayerSpotted;
     }
 
-    // Called for every searcher whenever ANY enemy spots the player.
-    // Interrupts the patrol (no matter what it was doing) and starts chasing.
+    // Called for every searcher whenever ANY enemy can see the player — not once,
+    // but again and again while they stay visible. Interrupts the patrol and
+    // (re)routes toward wherever the player was last reported.
     private void OnPlayerSpotted(Vector2 lastKnownPosition)
     {
         // Only remember the spot to come back to the first time — if it's already
         // chasing or heading home, don't overwrite it with where it is mid-chase.
         if (state != State.Chasing && state != State.Returning)
-        {
             preInvestigatePosition = transform.position;
-            hasSeenPlayerThisChase = false;
-        }
 
-        investigateTarget = lastKnownPosition;
-        SetPathTo(investigateTarget); // route around walls, in case it can't see the player itself
+        // A fresh alert means SOMEONE can see the player right now, so the trail is
+        // live and worth following. Whether THIS enemy has eyes on them is decided
+        // frame by frame below.
+        hasEyesOnPlayer = false;
+
+        SetPathTo(lastKnownPosition); // always a route around walls, never a straight line
         state = State.Chasing;
     }
 
@@ -128,33 +129,29 @@ public class SearcherEnemy : EnemyBase
                 break;
 
             case State.Chasing:
-                if (playerDetected && detectedPlayer != null)
+                if (playerDetected)
                 {
-                    // It can SEE the player, so a straight line is guaranteed clear of
-                    // walls — the vision raycast just proved exactly that. No route needed.
-                    investigateTarget = detectedPlayer.position;
-                    hasSeenPlayerThisChase = true;
-                    currentPath = null;
-
-                    FaceDirection(investigateTarget - (Vector2)transform.position);
-                    transform.position = Vector2.MoveTowards(transform.position, investigateTarget, moveSpeed * Time.deltaTime);
+                    // Its own cone is on the player. The repeating alert keeps rebuilding
+                    // the route underneath, so it tracks them instead of walking to a
+                    // spot they already left.
+                    hasEyesOnPlayer = true;
+                }
+                else if (hasEyesOnPlayer)
+                {
+                    // It was watching them and lost sight, and no other enemy has
+                    // re-reported since — the trail is cold, head home.
+                    BeginReturn();
                     break;
                 }
 
-                if (hasSeenPlayerThisChase)
-                {
-                    BeginReturn(); // was watching them and just lost sight -> head home
-                    break;
-                }
-
-                // Never saw the player itself — it's reacting to someone else's alert,
-                // so it walks the route to the reported spot and gives up there.
-                if (FollowPath(investigateTarget))
+                // Walk the route to the last reported position. EVERY movement in this
+                // script goes through the pathfinder now; no shortcut skips walls.
+                if (FollowPath())
                     BeginReturn();
                 break;
 
             case State.Returning:
-                if (FollowPath(preInvestigatePosition))
+                if (FollowPath())
                     ResumePatrol();
                 break;
         }
@@ -169,19 +166,16 @@ public class SearcherEnemy : EnemyBase
         pathIndex = 0;
     }
 
-    // Walks one frame's worth along the current route. Returns true on arrival.
-    // If there's no route at all, it walks straight at the destination rather
-    // than freezing — a searcher standing still forever would look broken.
-    private bool FollowPath(Vector2 fallbackDestination)
+    // Walks one frame's worth along the current route. Returns true when there's
+    // nothing left to walk — either it arrived, or there was no route to begin with.
+    //
+    // Giving up when there's no route is deliberate. Walking straight at the
+    // destination instead would cut through walls, which is the exact thing the
+    // pathfinding is here to prevent. Better a searcher that shrugs and goes back
+    // to work than one that phases through a wall.
+    private bool FollowPath()
     {
-        if (currentPath == null)
-        {
-            FaceDirection(fallbackDestination - (Vector2)transform.position);
-            transform.position = Vector2.MoveTowards(transform.position, fallbackDestination, moveSpeed * Time.deltaTime);
-            return Vector2.Distance(transform.position, fallbackDestination) < 0.05f;
-        }
-
-        if (pathIndex >= currentPath.Count) return true;
+        if (currentPath == null || pathIndex >= currentPath.Count) return true;
 
         Vector2 nextStep = currentPath[pathIndex];
         FaceDirection(nextStep - (Vector2)transform.position);

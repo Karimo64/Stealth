@@ -39,9 +39,9 @@ public static class Pathfinder
         if (startCell == goalCell)
             return new List<Vector2> { goal }; // already there, just step to the exact spot
 
-        if (IsBlocked(goalCell, obstacleMask))
-            return null; // the goal itself is inside a wall
-
+        // No "is the goal inside a wall?" check here on purpose — see StepBlocked for
+        // why asking about a single cell isn't reliable. An unreachable goal simply
+        // exhausts the search below and comes back as null, which is handled.
         List<Node> open = new List<Node>();                     // found, but not examined yet
         HashSet<Vector2Int> closed = new HashSet<Vector2Int>();  // already examined, don't revisit
         Dictionary<Vector2Int, Node> openLookup = new Dictionary<Vector2Int, Node>();
@@ -116,9 +116,9 @@ public static class Pathfinder
         return Vector2Int.Distance(from, to);
     }
 
-    // The 8 surrounding cells, minus the blocked ones. A diagonal is only
-    // allowed when both cells beside it are free — otherwise the enemy would
-    // slip through the corner where two walls meet.
+    // The surrounding cells we can actually STEP to. A diagonal is only allowed
+    // when both orthogonal steps beside it are open too — otherwise the enemy
+    // would slip through the corner where two walls meet.
     private static IEnumerable<Vector2Int> Neighbours(Vector2Int cell, LayerMask obstacleMask)
     {
         for (int dx = -1; dx <= 1; dx++)
@@ -127,26 +127,31 @@ public static class Pathfinder
             {
                 if (dx == 0 && dy == 0) continue; // that's the cell itself
 
-                Vector2Int neighbour = new Vector2Int(cell.x + dx, cell.y + dy);
-                if (IsBlocked(neighbour, obstacleMask)) continue;
-
                 if (dx != 0 && dy != 0)
                 {
-                    bool sideA = IsBlocked(new Vector2Int(cell.x + dx, cell.y), obstacleMask);
-                    bool sideB = IsBlocked(new Vector2Int(cell.x, cell.y + dy), obstacleMask);
-                    if (sideA || sideB) continue; // would cut through a corner
+                    if (StepBlocked(cell, new Vector2Int(cell.x + dx, cell.y), obstacleMask)) continue;
+                    if (StepBlocked(cell, new Vector2Int(cell.x, cell.y + dy), obstacleMask)) continue;
                 }
+
+                Vector2Int neighbour = new Vector2Int(cell.x + dx, cell.y + dy);
+                if (StepBlocked(cell, neighbour, obstacleMask)) continue;
 
                 yield return neighbour;
             }
         }
     }
 
-    // Blocked if any wall collider overlaps the cell. The box is shrunk a little
-    // so it only catches walls actually on this cell, not the ones next door.
-    private static bool IsBlocked(Vector2Int cell, LayerMask obstacleMask)
+    // Can we move from one cell to the next without crossing a wall?
+    //
+    // Note this asks about the STEP, not about the cell — and that's deliberate.
+    // A Composite Collider set to "Outlines" (Unity's default) is only the OUTLINE
+    // of the walls, hollow inside. So asking "is there a wall sitting on this cell?"
+    // answers NO for every cell in the middle of a wall, and a route would happily
+    // run straight through it. Going from one cell to the next has to cross that
+    // outline, so testing the step works with hollow outlines and solid shapes alike.
+    private static bool StepBlocked(Vector2Int from, Vector2Int to, LayerMask obstacleMask)
     {
-        return Physics2D.OverlapBox(CellToWorld(cell), Vector2.one * (cellSize * 0.9f), 0f, obstacleMask) != null;
+        return Physics2D.Linecast(CellToWorld(from), CellToWorld(to), obstacleMask);
     }
 
     private static Vector2Int WorldToCell(Vector2 world)

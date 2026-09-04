@@ -17,6 +17,10 @@ public class EnemyBase : MonoBehaviour
     [SerializeField] protected float viewRadius = 3f;
     [SerializeField] protected float viewAngle = 65f;
 
+    [Tooltip("How often the alert is re-sent while the player stays in sight. " +
+             "Lower = searchers track more tightly, at the cost of recalculating routes more often.")]
+    [SerializeField] private float alertRepeatInterval = 0.25f;
+
     [Header("Layers")]
     [SerializeField] protected LayerMask obstacleMask;  // set to "Walls"
     [SerializeField] protected LayerMask playerMask;    // set to "Player"
@@ -28,7 +32,8 @@ public class EnemyBase : MonoBehaviour
 
     protected bool playerDetected;
     protected Transform detectedPlayer;
-    private bool wasDetectedLastFrame; // used to only fire the alert once per detection, not every frame
+    private bool wasDetectedLastFrame; // so the first alert goes out the instant detection starts
+    private float alertTimer;          // counts down to the next repeat while the player stays visible
 
     private const int rayCount = 30; // how many slices make up the cone mesh (higher = smoother)
     private Mesh viewMesh;
@@ -82,9 +87,20 @@ public class EnemyBase : MonoBehaviour
             }
         }
 
-        // Rising edge: only fire the moment detection STARTS, not every frame.
-        if (playerDetected && !wasDetectedLastFrame)
-            PlayerSpotted?.Invoke(detectedPlayer.position);
+        // The alert goes out the instant detection starts, and then KEEPS going out
+        // while the player stays in sight, carrying their updated position each time.
+        // That's what lets searchers track someone who's moving — and it means the
+        // only way to stop being hunted is to break line of sight.
+        if (playerDetected)
+        {
+            alertTimer -= Time.deltaTime;
+
+            if (!wasDetectedLastFrame || alertTimer <= 0f)
+            {
+                PlayerSpotted?.Invoke(detectedPlayer.position);
+                alertTimer = alertRepeatInterval;
+            }
+        }
 
         wasDetectedLastFrame = playerDetected;
     }
