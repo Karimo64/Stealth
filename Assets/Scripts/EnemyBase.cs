@@ -18,8 +18,9 @@ public class EnemyBase : MonoBehaviour
     [SerializeField] protected float viewAngle = 65f;
 
     [Header("Layers")]
-    [SerializeField] protected LayerMask obstacleMask; // set to "Walls"
+    [SerializeField] protected LayerMask obstacleMask;  // set to "Walls"
     [SerializeField] protected LayerMask playerMask;    // set to "Player"
+    [SerializeField] protected LayerMask safeZoneMask;  // set to "SafeZones"
 
     [Header("Cone Colors")]
     [SerializeField] private Color normalColor = new Color(1f, 1f, 0f, 0.35f);   // yellow, semi-transparent
@@ -55,15 +56,15 @@ public class EnemyBase : MonoBehaviour
     }
 
     // Checks whether the player is within range, within the cone angle,
-    // AND not hidden behind a wall. Fires PlayerSpotted the moment
-    // detection starts (not every frame it stays true).
+    // NOT hidden behind a wall, and NOT standing in a safe zone. Fires
+    // PlayerSpotted the moment detection starts (not every frame it stays true).
     protected virtual void DetectPlayer()
     {
         playerDetected = false;
         detectedPlayer = null;
 
         Collider2D playerCollider = Physics2D.OverlapCircle(transform.position, viewRadius, playerMask);
-        if (playerCollider != null)
+        if (playerCollider != null && !IsInSafeZone(playerCollider.transform.position))
         {
             Vector2 dirToPlayer = (playerCollider.transform.position - transform.position).normalized;
 
@@ -86,6 +87,16 @@ public class EnemyBase : MonoBehaviour
             PlayerSpotted?.Invoke(detectedPlayer.position);
 
         wasDetectedLastFrame = playerDetected;
+    }
+
+    // The player is invisible while standing in a safe zone. This is asked
+    // fresh every frame rather than stored, so stepping in or out takes effect
+    // immediately — even if the enemy was already looking right at them.
+    // Uses the player's center point: they're hidden as soon as it's on a
+    // safe-zone tile, without needing to fit the whole sprite inside.
+    protected bool IsInSafeZone(Vector2 position)
+    {
+        return Physics2D.OverlapPoint(position, safeZoneMask) != null;
     }
 
     // Builds a fan-shaped mesh representing the vision cone. Each "slice" is

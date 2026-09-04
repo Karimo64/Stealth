@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 // A patrolling enemy: walks between waypoints, ALWAYS facing the direction it
@@ -5,9 +6,10 @@ using UnityEngine;
 // smoothly rotates until it's aiming at the next waypoint, and walks on.
 // Detection + vision cone come from EnemyBase, same as CameraEnemy.
 //
-// It also listens for EnemyBase.PlayerSpotted: when ANY enemy spots the
-// player, it drops its patrol and reacts. CameraEnemy never subscribes, so
-// cameras are unaffected.
+// When any enemy spots the player it drops its patrol and reacts. Going to a
+// reported spot or walking home is done with Pathfinder, so it goes AROUND
+// walls instead of through them. Chasing a player it can actually see stays a
+// straight line — see the comment in State.Chasing for why that's safe.
 //
 // Facing is never stored — it's always derived from where the enemy is
 // heading. That's what keeps it from ending up crooked after a chase.
@@ -32,6 +34,10 @@ public class SearcherEnemy : EnemyBase
     [SerializeField] private float waitDuration = 1.5f;
     [SerializeField] private float turnSpeed = 180f; // degrees per second while turning
 
+    [Header("Debug")]
+    [Tooltip("Draws the current route in the Scene view while playing (needs Gizmos on).")]
+    [SerializeField] private bool showPath = true;
+
     private enum State { Moving, Waiting, Turning, Chasing, Returning }
     private State state;
     private int targetIndex;
@@ -43,6 +49,9 @@ public class SearcherEnemy : EnemyBase
     private Vector2 investigateTarget;
     private Vector2 preInvestigatePosition; // spot to walk back to once it gives up chasing
     private bool hasSeenPlayerThisChase;    // true once THIS enemy's own cone has actually caught the player
+
+    private List<Vector2> currentPath; // route from Pathfinder, null = walk straight
+    private int pathIndex;             // which step of that route we're heading to
 
     protected override void Awake()
     {
@@ -79,6 +88,7 @@ public class SearcherEnemy : EnemyBase
         }
 
         investigateTarget = lastKnownPosition;
+        SetPathTo(investigateTarget); // route around walls, in case it can't see the player itself
         state = State.Chasing;
     }
 
@@ -118,36 +128,75 @@ public class SearcherEnemy : EnemyBase
                 break;
 
             case State.Chasing:
-                // Still seeing the player with its OWN cone? Keep tracking their live position.
                 if (playerDetected && detectedPlayer != null)
                 {
+                    // It can SEE the player, so a straight line is guaranteed clear of
+                    // walls — the vision raycast just proved exactly that. No route needed.
                     investigateTarget = detectedPlayer.position;
                     hasSeenPlayerThisChase = true;
+                    currentPath = null;
+
+                    FaceDirection(investigateTarget - (Vector2)transform.position);
+                    transform.position = Vector2.MoveTowards(transform.position, investigateTarget, moveSpeed * Time.deltaTime);
+                    break;
                 }
 
-                FaceDirection(investigateTarget - (Vector2)transform.position);
-                transform.position = Vector2.MoveTowards(transform.position, investigateTarget, moveSpeed * Time.deltaTime);
+                if (hasSeenPlayerThisChase)
+                {
+                    BeginReturn(); // was watching them and just lost sight -> head home
+                    break;
+                }
 
-                // Two ways this leg ends:
-                // - It was actually watching the player and just lost sight -> turn back right away.
-                // - It never saw the player itself (just reacting to another enemy's alert) ->
-                //   walk all the way to the reported spot first, then give up.
-                bool lostSight = hasSeenPlayerThisChase && !playerDetected;
-                bool reachedReportedSpot = !hasSeenPlayerThisChase &&
-                    Vector2.Distance(transform.position, investigateTarget) < 0.05f;
-
-                if (lostSight || reachedReportedSpot)
-                    state = State.Returning;
+                // Never saw the player itself — it's reacting to someone else's alert,
+                // so it walks the route to the reported spot and gives up there.
+                if (FollowPath(investigateTarget))
+                    BeginReturn();
                 break;
 
             case State.Returning:
-                FaceDirection(preInvestigatePosition - (Vector2)transform.position); // looks the way it's walking back
-                transform.position = Vector2.MoveTowards(transform.position, preInvestigatePosition, moveSpeed * Time.deltaTime);
-
-                if (Vector2.Distance(transform.position, preInvestigatePosition) < 0.05f)
+                if (FollowPath(preInvestigatePosition))
                     ResumePatrol();
                 break;
         }
+
+        DrawPathDebug();
+    }
+
+    // Asks Pathfinder for a route around the walls and starts following it.
+    private void SetPathTo(Vector2 destination)
+    {
+        currentPath = Pathfinder.FindPath(transform.position, destination, obstacleMask);
+        pathIndex = 0;
+    }
+
+    // Walks one frame's worth along the current route. Returns true on arrival.
+    // If there's no route at all, it walks straight at the destination rather
+    // than freezing — a searcher standing still forever would look broken.
+    private bool FollowPath(Vector2 fallbackDestination)
+    {
+        if (currentPath == null)
+        {
+            FaceDirection(fallbackDestination - (Vector2)transform.position);
+            transform.position = Vector2.MoveTowards(transform.position, fallbackDestination, moveSpeed * Time.deltaTime);
+            return Vector2.Distance(transform.position, fallbackDestination) < 0.05f;
+        }
+
+        if (pathIndex >= currentPath.Count) return true;
+
+        Vector2 nextStep = currentPath[pathIndex];
+        FaceDirection(nextStep - (Vector2)transform.position);
+        transform.position = Vector2.MoveTowards(transform.position, nextStep, moveSpeed * Time.deltaTime);
+
+        if (Vector2.Distance(transform.position, nextStep) < 0.05f)
+            pathIndex++;
+
+        return pathIndex >= currentPath.Count;
+    }
+
+    private void BeginReturn()
+    {
+        SetPathTo(preInvestigatePosition);
+        state = State.Returning;
     }
 
     // Points the enemy along dir. Rotates ONLY on the Z axis — FromToRotation
@@ -196,6 +245,8 @@ public class SearcherEnemy : EnemyBase
     // aims it at the waypoint on the very next frame.
     private void ResumePatrol()
     {
+        currentPath = null;
+
         // Came back standing on the waypoint it was headed to? Take the next one
         // instead of re-doing that waypoint's wait and turn.
         if (patrolPoints.Length >= 2 &&
@@ -209,5 +260,18 @@ public class SearcherEnemy : EnemyBase
     {
         targetIndex = (targetIndex + 1) % patrolPoints.Length; // loop back to point 0 after the last one
         state = State.Moving;
+    }
+
+    // Shows the route it's currently following, in the Scene view during play.
+    private void DrawPathDebug()
+    {
+        if (!showPath || currentPath == null) return;
+
+        Vector2 from = transform.position;
+        for (int i = pathIndex; i < currentPath.Count; i++)
+        {
+            Debug.DrawLine(from, currentPath[i], Color.cyan);
+            from = currentPath[i];
+        }
     }
 }
